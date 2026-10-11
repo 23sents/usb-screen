@@ -16,7 +16,7 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import simpledialog
+from tkinter import messagebox
 
 try:
     from PIL import Image, ImageTk
@@ -32,20 +32,33 @@ def adb_forward():
     """Пробрасывает порт телефона на localhost. Возвращает текст ошибки или None."""
     adb = shutil.which("adb")
     if not adb:
-        return "adb не найден: sudo apt install adb"
+        return "adb не найден. Установите: sudo apt install adb"
     try:
-        out = subprocess.run([adb, "devices"], capture_output=True, text=True, timeout=15).stdout
+        out = subprocess.run([adb, "devices"], capture_output=True, text=True, timeout=20).stdout
     except Exception as err:
-        return "adb: %s" % err
-    rows = [l.split() for l in out.strip().splitlines()[1:] if l.strip()]
-    ready = [r[0] for r in rows if len(r) > 1 and r[1] == "device"]
+        return "Ошибка adb: %s" % err
+    rows = []
+    for line in out.splitlines():
+        line = line.strip()
+        if not line or line.startswith("*") or line.startswith("List of"):
+            continue
+        rows.append(line.split(None, 1))
+    ready = [r[0] for r in rows if len(r) > 1 and r[1].strip() == "device"]
     if not ready:
-        if any(len(r) > 1 and r[1] == "unauthorized" for r in rows):
-            return "Телефон не разрешил этот компьютер: подтвердите запрос «Разрешить отладку по USB»"
-        return "Телефон не найден: кабель, режим «Передача файлов», «Отладка по USB»"
+        states = " ".join(r[1] for r in rows if len(r) > 1)
+        if "unauthorized" in states:
+            return "Телефон не разрешил этот компьютер: на телефоне подтвердите запрос «Разрешить отладку по USB»."
+        if "no permissions" in states:
+            return "Нет прав на USB-устройство. Попробуйте: adb kill-server, затем переподключите кабель."
+        if "offline" in states:
+            return "Телефон «offline»: переподключите кабель или переключите отладку по USB."
+        return ("Телефон по кабелю не найден. Проверьте: кабель умеет передавать данные, "
+                "режим USB «Передача файлов», включена «Отладка по USB».")
     r = subprocess.run([adb, "-s", ready[0], "forward", "tcp:%d" % PORT, "tcp:%d" % PORT],
-                       capture_output=True, text=True, timeout=15)
-    return r.stderr.strip() or None if r.returncode else None
+                       capture_output=True, text=True, timeout=20)
+    if r.returncode:
+        return "adb forward не удался: %s" % (r.stderr.strip() or r.stdout.strip())
+    return None
 
 
 class Link:
@@ -130,7 +143,7 @@ class Link:
 class App:
     PRESETS = {"Качество: низкое": 1, "Качество: среднее": 2, "Качество: высокое": 3}
 
-    def __init__(self):
+    def __init__(self, pin=""):
         self.root = tk.Tk()
         self.root.title("USB Screen")
         self.states = queue.SimpleQueue()
@@ -142,25 +155,30 @@ class App:
         self.ox = self.oy = self.nw = self.nh = 0
         self.down = None
         self.last_wheel = 0.0
-        self.pin = ""
-        self.state_text = "Не подключено"
+        self.state_text = "Введите PIN из приложения на телефоне и нажмите «Подключить»"
         self.frames = 0
         self.fps = 0
         self.fps_at = time.time()
 
         bar = tk.Frame(self.root)
         bar.pack(side="top", fill="x")
-        tk.Button(bar, text="⟳ Подключить", command=self.connect).pack(side="left", padx=2, pady=2)
+        tk.Label(bar, text="PIN:").pack(side="left", padx=(6, 0))
+        self.pin_var = tk.StringVar(value=pin)
+        self.pin_entry = tk.Entry(bar, textvariable=self.pin_var, width=8, font=("TkDefaultFont", 12))
+        self.pin_entry.pack(side="left", padx=3, pady=3)
+        self.pin_entry.bind("<Return>", lambda e: self.connect())
+        tk.Button(bar, text="Подключить", command=self.connect).pack(side="left", padx=2, pady=2)
         for text, cmd in (("◀", "back"), ("●", "home"), ("▣", "recents"), ("☰", "notif")):
-            tk.Button(bar, text=text, width=3, command=lambda c=cmd: self.link.send(c)).pack(side="left", padx=1, pady=2)
+            tk.Button(bar, text=text, width=2, command=lambda c=cmd: self.link.send(c)).pack(side="left", padx=1, pady=2)
         self.qvar = tk.StringVar(value="Качество: среднее")
-        tk.OptionMenu(bar, self.qvar, *self.PRESETS, command=self._quality).pack(side="left", padx=6)
-        self.status = tk.Label(bar, text=self.state_text, anchor="e")
-        self.status.pack(side="right", padx=6)
+        tk.OptionMenu(bar, self.qvar, *self.PRESETS, command=self._quality).pack(side="left", padx=4)
 
-        self.canvas = tk.Canvas(self.root, bg="black", highlightthickness=0, width=380, height=800)
+        self.status = tk.Label(self.root, text=self.state_text, anchor="w", justify="left", wraplength=420)
+        self.status.pack(side="top", fill="x", padx=6, pady=2)
+
+        self.canvas = tk.Canvas(self.root, bg="black", highlightthickness=0, width=420, height=780)
         self.canvas.pack(fill="both", expand=True)
-        self.canvas.bind("<Configure>", lambda e: self._redraw())
+        self.canvas.bind("<Configure>", self._on_resize)
         self.canvas.bind("<ButtonPress-1>", self._press)
         self.canvas.bind("<ButtonRelease-1>", self._release)
         self.canvas.bind("<ButtonPress-2>", lambda e: self.link.send("home"))
@@ -169,30 +187,43 @@ class App:
         self.canvas.bind("<Button-5>", lambda e: self._wheel(e, -1))
         self.canvas.bind("<MouseWheel>", lambda e: self._wheel(e, 1 if e.delta > 0 else -1))
         self.root.bind("<Key>", self._key)
-        self.root.after(30, self._tick)
-        self.root.after(400, self.connect)
+        self.root.after(15, self._tick)
+        if pin:
+            self.root.after(400, self.connect)
+        else:
+            self.root.after(300, lambda: threading.Thread(target=self._check_adb, daemon=True).start())
+            self.pin_entry.focus_set()
 
     # ---- подключение ----
+    def _check_adb(self):
+        err = adb_forward()
+        self.states.put(err or "Телефон найден по кабелю. Введите PIN из приложения и нажмите «Подключить».")
+
     def connect(self):
+        pin = self.pin_var.get().strip()
+        if not pin:
+            self.states.put("Введите PIN из приложения на телефоне (он виден после «Начать трансляцию»).")
+            self.pin_entry.focus_set()
+            return
+        self.states.put("Ищу телефон по кабелю…")
+        threading.Thread(target=self._connect_worker, args=(pin,), daemon=True).start()
+
+    def _connect_worker(self, pin):
         err = adb_forward()
         if err:
-            self.state_text = err
-            self.status.config(text=err)
+            self.states.put("!" + err)
             return
-        pin = simpledialog.askstring("PIN", "Введите PIN, показанный в приложении на телефоне:",
-                                     initialvalue=self.pin, parent=self.root)
-        if not pin:
-            return
-        self.pin = pin.strip()
-        self.state_text = "Подключаюсь…"
-        self.status.config(text=self.state_text)
-        threading.Thread(target=self.link.connect, args=(self.pin,), daemon=True).start()
+        self.link.connect(pin)
 
     # ---- приём кадров ----
     def _on_frame(self, data):
         self.frames += 1
         with self.flock:
             self.latest = data
+
+    def _on_resize(self, e):
+        self.status.config(wraplength=max(e.width - 12, 120))
+        self._redraw()
 
     def _tick(self):
         with self.flock:
@@ -206,8 +237,13 @@ class App:
             except Exception:
                 pass
         changed = False
+        popup = None
         while not self.states.empty():
-            self.state_text = self.states.get()
+            msg = self.states.get()
+            if msg.startswith("!"):
+                msg = msg[1:]
+                popup = msg
+            self.state_text = msg
             changed = True
         now = time.time()
         if now - self.fps_at >= 1:
@@ -218,6 +254,8 @@ class App:
         if changed:
             live = self.link.sock is not None and self.state_text == "Подключено"
             self.status.config(text=self.state_text + (" · %d fps" % self.fps if live else ""))
+        if popup:
+            messagebox.showerror("USB Screen", popup)
         self.root.after(15, self._tick)
 
     def _redraw(self):
@@ -243,6 +281,7 @@ class App:
         return (nx, ny) if 0 <= nx <= 1 and 0 <= ny <= 1 else None
 
     def _press(self, e):
+        self.canvas.focus_set()
         self.down = (e.x, e.y, time.time()) if self._norm(e.x, e.y) else None
 
     def _release(self, e):
@@ -270,6 +309,8 @@ class App:
         self.link.send("swipe %.4f %.4f %.4f %.4f 180" % (p[0], a, p[0], b))
 
     def _key(self, e):
+        if e.widget is self.pin_entry:      # печатаем PIN, а не на телефоне
+            return
         if e.keysym == "BackSpace":
             self.link.send("bs")
         elif e.keysym in ("Return", "KP_Enter"):
@@ -284,4 +325,4 @@ class App:
 
 
 if __name__ == "__main__":
-    App().root.mainloop()
+    App(sys.argv[1] if len(sys.argv) > 1 else "").root.mainloop()
