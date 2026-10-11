@@ -117,7 +117,7 @@ class MainActivity : Activity() {
         col.addView(Glass.button(this, "1.  Включить управление", 0x24FFFFFF, 0x40FFFFFF) {
             startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
         }, lp(20))
-        col.addView(Glass.button(this, "2.  Начать трансляцию", 0x553A7BFF, 0x883A7BFF) {
+        col.addView(Glass.button(this, "2.  Начать трансляцию", 0x553A7BFF, 0x883A7BFF.toInt()) {
             val mpm = getSystemService(MediaProjectionManager::class.java)
             @Suppress("DEPRECATION")
             startActivityForResult(mpm.createScreenCaptureIntent(), reqProjection)
