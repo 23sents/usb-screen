@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">USB Screen</string>
+    <string name="a11y_desc">Позволяет ПК, подключённому по USB-кабелю, нажимать и проводить пальцем по экрану этого телефона и вводить текст. Работает только пока вы сами запустили трансляцию.</string>
+</resources>
